@@ -75,8 +75,8 @@ struct RtlSdr::Impl {
     {
 #ifdef _WIN32
         const char* candidates[] = {
+            "librtlsdr.dll",                          // portable release folder
             "C:\\msys64\\mingw64\\bin\\librtlsdr.dll",
-            "librtlsdr.dll",
             "rtlsdr.dll",
         };
         for (const char* path : candidates) {
