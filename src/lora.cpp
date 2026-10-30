@@ -741,7 +741,7 @@ bool tryBurst(const std::vector<std::complex<double>>& iq, int burstStart, int b
     // The dechirp couples CFO and fractional timing.  Trying several sub-symbol
     // start phases makes the decoder robust to where the coarse search landed.
     // Positive phases are the common case (coarse search landed early).
-    static const int phaseKs[] = {0, 1, -1, 2, -2, 3, 4, 5, 6, 7, 8};
+    static const int phaseKs[] = {0}; // full-rate fallback handles fractional timing
     for (int pk : phaseKs) {
         const int pstart = preamble + pk * eighthFull;
         if (pstart < 0) continue;
