@@ -738,15 +738,11 @@ bool tryBurst(const std::vector<std::complex<double>>& iq, int burstStart, int b
     const int eighthFull = p.sps / 8;
     const int eighthDec = p.N / 8;
 
-    // The dechirp couples CFO and fractional timing.  Trying several sub-symbol
-    // start phases makes the decoder robust to where the coarse search landed.
-    // Positive phases are the common case (coarse search landed early).
-    static const int phaseKs[] = {0}; // full-rate fallback handles fractional timing
-    for (int pk : phaseKs) {
+    auto tryDecimated = [&](int pk) -> bool {
         const int pstart = preamble + pk * eighthFull;
-        if (pstart < 0) continue;
+        if (pstart < 0) return false;
         auto d = decimate(iq, pstart, maxSymbols * p.N, p);
-        if (static_cast<int>(d.size()) < 24 * p.N) continue;
+        if (static_cast<int>(d.size()) < 24 * p.N) return false;
         const double cfo = estimateCfo(d, p, c);
         applyCfo(d, cfo, p);
         if (verbose && pk == 0)
@@ -762,7 +758,11 @@ bool tryBurst(const std::vector<std::complex<double>>& iq, int burstStart, int b
             decodeStream(d, preamble, p, c, out, log, verbose, "decw",
                          0, 70 * p.N, false))
             return true;
-    }
+        return false;
+    };
+
+    // Fast path: best timing phase, then full-rate demodulation.
+    if (tryDecimated(0)) return true;
 
     // The decimated domain folds large CFOs.  Re-estimate at the full sample
     // rate (which is unambiguous across the whole captured band), shift the
@@ -773,24 +773,31 @@ bool tryBurst(const std::vector<std::complex<double>>& iq, int burstStart, int b
                   << (cfoFull * p.bw / p.N) << " Hz)\n";
     const int lo = std::max(0, preamble - p.sps);
     const int hi = std::min(static_cast<int>(iq.size()), preamble + maxSymbols * p.sps);
-    if (hi - lo <= 24 * p.sps) return false;
 
-    std::vector<std::complex<double>> shifted(static_cast<size_t>(hi - lo));
-    for (int k = 0; k < hi - lo; ++k) {
-        const double phase = -2.0 * PI * cfoFull * static_cast<double>(k) / p.sps;
-        shifted[static_cast<size_t>(k)] =
-            iq[static_cast<size_t>(lo + k)] * std::polar(1.0, phase);
+    if (hi - lo > 24 * p.sps) {
+        std::vector<std::complex<double>> shifted(static_cast<size_t>(hi - lo));
+        for (int k = 0; k < hi - lo; ++k) {
+            const double phase = -2.0 * PI * cfoFull * static_cast<double>(k) / p.sps;
+            shifted[static_cast<size_t>(k)] =
+                iq[static_cast<size_t>(lo + k)] * std::polar(1.0, phase);
+        }
+
+        const int preambleShifted = preamble - lo;
+        // Demodulate directly at the full sample rate: this avoids the
+        // decimation phase ambiguity.
+        const int headerCenterFull = preambleShifted + expectedHeader * p.sps;
+        const int halfWin = std::max(p.N, p.sps / 2);
+        if (decodeStream(shifted, preamble, p, c, out, log, verbose, "full",
+                         headerCenterFull - halfWin, headerCenterFull + halfWin, true))
+            return true;
     }
 
-    const int preambleShifted = preamble - lo;
-    // Demodulate directly at the full sample rate: this avoids the decimation
-    // phase ambiguity entirely (the same burst can otherwise decode or fail
-    // depending on which capture it came from).
-    const int headerCenterFull = preambleShifted + expectedHeader * p.sps;
-    const int halfWin = std::max(p.N, p.sps / 2);
-    if (decodeStream(shifted, preamble, p, c, out, log, verbose, "full",
-                     headerCenterFull - halfWin, headerCenterFull + halfWin, true))
-        return true;
+    // Last resort: try the remaining fractional timing phases.  This is slower
+    // but recovers captures whose preamble lands on an awkward sample phase.
+    static const int phaseKs[] = {1, -1, 2, -2, 3, 4, 5, 6, 7, 8};
+    for (int pk : phaseKs) {
+        if (tryDecimated(pk)) return true;
+    }
     return false;
 }
 
