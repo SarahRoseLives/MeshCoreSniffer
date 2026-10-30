@@ -1,7 +1,7 @@
 // MeshCoreSniffer - real-time RTL-SDR MeshCore decoder (default) with
 // offline IQ-file decoding support.
 //
-//   MeshCoreSniffer [--freq 910.525] [--rate 1000000]
+//   MeshCoreSniffer [--freq 910.525] [--rate 250000]
 //                   [--gain auto|dB] [--ppm N] [--device N]
 //                   [--bias-tee] [--key <hex|base64>] [--verbose]
 //
@@ -14,6 +14,7 @@
 // The default channel key is the MeshCore public channel key.
 
 #include "crypto.h"
+#include "fft.h"
 #include "lora.h"
 #include "meshcore.h"
 #include "rtl_sdr.h"
@@ -48,7 +49,7 @@ struct Options {
     std::string iqPath;
     bool rtl = false;
     double freqHz = 910525000.0;
-    uint32_t rate = 1000000;
+    uint32_t rate = 250000;
     std::string gain = "auto";
     int ppm = 0;
     bool biasTee = false;
@@ -57,6 +58,7 @@ struct Options {
     double bw = 62500.0;
     double thresholdDb = 3.0;
     bool verbose = false;
+    std::string dumpDir;
     bool help = false;
     std::vector<std::vector<uint8_t>> keys;
 };
@@ -202,7 +204,7 @@ void usage(const char* argv0)
         << "RTL-SDR (default):\n"
         << "  --freq VALUE    center frequency, e.g. 910.525 (MHz) or 910525000 (Hz)\n"
         << "                  default: 910.525 MHz (MeshCore US preset)\n"
-        << "  --rate HZ       sample rate (default 1000000; must be an integer\n"
+        << "  --rate HZ       sample rate (default 250000; must be an integer\n"
         << "                  multiple of --bw, e.g. 250000, 500000, 1000000)\n"
         << "  --gain auto|dB  tuner gain (default auto)\n"
         << "  --ppm N         crystal frequency correction\n"
@@ -268,6 +270,8 @@ bool parseArgs(int argc, char** argv, Options& opt)
                 opt.keys.push_back(std::move(k));
         } else if (a == "--verbose") {
             opt.verbose = true;
+        } else if (a == "--dump-dir" && i + 1 < argc) {
+            opt.dumpDir = argv[++i];
         } else if (a == "--help" || a == "-h") {
             usage(argv[0]);
             opt.help = true;
@@ -548,21 +552,48 @@ void printRealtimePacket(const mc::LoraPacket& pkt, const Options& opt)
     std::cout << "\n";
 }
 
-double rmsBlock(const std::complex<double>* x, int n)
-{
-    if (n <= 0) return 0.0;
-    double s = 0.0;
-    for (int i = 0; i < n; ++i) s += std::norm(x[i]);
-    return std::sqrt(s / n);
-}
+// In-channel energy detector.  A DC blocker followed by a one-pole low-pass
+// whose equivalent noise bandwidth is the LoRa bandwidth.  This is O(1) per
+// sample: an FFT per block was accurate but spent enough time between USB reads
+// that the RTL dropped samples, which made live decoding unreliable.
+struct BandDetector {
+    std::complex<double> prev = 0.0;
+    std::complex<double> hp = 0.0;
+    std::complex<double> lp = 0.0;
+    double hpCoeff = 0.99;
+    double lpCoeff = 0.1;
+
+    void init(double fs, double bw)
+    {
+        if (fs <= 0.0 || bw <= 0.0) return;
+        const double hpHz = std::max(500.0, bw / 64.0);
+        hpCoeff = std::exp(-2.0 * mc::PI * hpHz / fs);
+        // alpha/(2-alpha) gives the equivalent noise bandwidth bw/fs.
+        const double r = std::min(0.5, bw / fs);
+        lpCoeff = 2.0 * r / (1.0 + r);
+    }
+
+    double process(std::complex<double> x)
+    {
+        const std::complex<double> blocked = x - prev + hpCoeff * hp;
+        prev = x;
+        hp = blocked;
+        lp += lpCoeff * (blocked - lp);
+        return std::norm(lp);
+    }
+};
 
 using SampleSource = std::function<int(std::vector<std::complex<double>>&, int, std::string&)>;
 
 int runStream(const Options& opt, const mc::LoraParams& params, const SampleSource& source)
 {
-    const int blockSize = std::max(64, static_cast<int>(opt.rate / 1000)); // ~1 ms
+    // ~1 ms blocks.  Keep the FFT small enough to stay comfortably faster than
+    // the sample stream (a 1 MHz capture with 5 ms blocks needed an 8192-point
+    // FFT every block and could not keep up).  The median floor below makes the
+    // noisier short-block estimate safe.
+    const int blockSize = std::max(64, static_cast<int>(opt.rate / 1000));
     std::vector<std::complex<double>> chunk;
-    chunk.reserve(65536);
+    chunk.reserve(131072);
 
     std::deque<std::complex<double>> preRoll;
     const size_t preRollMax = static_cast<size_t>(opt.rate / 5); // 0.2 s
@@ -574,14 +605,35 @@ int runStream(const Options& opt, const mc::LoraParams& params, const SampleSour
     const size_t quietLimit = static_cast<size_t>(opt.rate * 3 / 20); // 150 ms
     const size_t maxCapture = static_cast<size_t>(opt.rate) * 2;      // 2 s
 
-    double noiseFloor = 0.02;
-    bool noiseInit = false;
+    double noiseFloor = 0.0;
     const double triggerFactor = std::pow(10.0, opt.thresholdDb / 20.0);
 
+    // Rolling median of recent block levels.  A plain EWMA can latch onto an
+    // unusually quiet first block and then false-trigger forever, and a signal
+    // during the warm-up can push the floor up.  The median is robust to both.
+    const size_t noiseWindow = 1000; // ~1 s at 1 ms blocks
+    const size_t noiseWarmup = 50;   // ignore the first ~50 ms
+    const size_t quietWindow = 50;   // ~50 ms median for end-of-burst detection
+    std::deque<double> noiseHistory;
+    std::deque<double> activeHistory;
+    std::vector<double> noiseSort;
+    auto medianLevel = [&]() -> double {
+        if (noiseHistory.empty()) return 1e-9;
+        noiseSort.assign(noiseHistory.begin(), noiseHistory.end());
+        const size_t mid = noiseSort.size() / 2;
+        std::nth_element(noiseSort.begin(), noiseSort.begin() + mid, noiseSort.end());
+        return std::max(noiseSort[mid], 1e-9);
+    };
+
     long long globalSamples = 0;
+    long long nextReport = opt.rate;
+    int captureIndex = 0;
+    BandDetector detector;
+    detector.init(params.fs, params.bw);
+    std::vector<double> blockLevels;
     while (!g_stop) {
         std::string err;
-        const int rc = source(chunk, 65536, err);
+        const int rc = source(chunk, 131072, err);
         if (rc == 1) break; // EOF (simulation)
         if (rc != 0) {
             if (!g_stop && !err.empty()) std::cerr << err << "\n";
@@ -590,18 +642,29 @@ int runStream(const Options& opt, const mc::LoraParams& params, const SampleSour
         const int pairs = static_cast<int>(chunk.size());
         if (pairs <= 0) { globalSamples += 0; continue; }
 
+        // Feed the whole chunk through the filter so the stream stays
+        // continuous even when a trigger short-circuits the scan.
+        blockLevels.clear();
+        blockLevels.reserve(static_cast<size_t>((pairs + blockSize - 1) / blockSize));
+        for (int start = 0; start < pairs; start += blockSize) {
+            const int n = std::min(blockSize, pairs - start);
+            double sum = 0.0;
+            for (int i = start; i < start + n; ++i) sum += detector.process(chunk[i]);
+            blockLevels.push_back(std::sqrt(sum / static_cast<double>(n)));
+        }
+
         if (!active) {
             int triggerBlock = -1;
-            for (int start = 0; start < pairs; start += blockSize) {
-                const int n = std::min(blockSize, pairs - start);
-                const double rms = rmsBlock(chunk.data() + start, n);
-                if (!noiseInit) {
-                    noiseFloor = std::max(0.005, rms);
-                    noiseInit = true;
-                }
-                if (rms < noiseFloor * 2.0)
-                    noiseFloor = noiseFloor * 0.995 + rms * 0.005;
-                if (rms > std::max(0.005, noiseFloor * triggerFactor)) {
+            for (size_t bi = 0; bi < blockLevels.size(); ++bi) {
+                const int start = static_cast<int>(bi) * blockSize;
+                const double level = blockLevels[bi];
+                noiseHistory.push_back(level);
+                while (noiseHistory.size() > noiseWindow) noiseHistory.pop_front();
+                noiseFloor = medianLevel();
+                if (opt.verbose && noiseHistory.size() == noiseWarmup)
+                    std::cerr << "[rx] in-band noise floor " << noiseFloor << "\n";
+                if (noiseHistory.size() >= noiseWarmup &&
+                    level > noiseFloor * triggerFactor) {
                     triggerBlock = start;
                     break;
                 }
@@ -610,6 +673,7 @@ int runStream(const Options& opt, const mc::LoraParams& params, const SampleSour
             if (triggerBlock >= 0) {
                 active = true;
                 quietSamples = 0;
+                activeHistory.clear();
                 capture.assign(preRoll.begin(), preRoll.end());
                 const int endOfTrigger = std::min(pairs, triggerBlock + blockSize);
                 capture.insert(capture.end(), chunk.begin(), chunk.begin() + endOfTrigger);
@@ -627,19 +691,50 @@ int runStream(const Options& opt, const mc::LoraParams& params, const SampleSour
             }
         } else {
             capture.insert(capture.end(), chunk.begin(), chunk.end());
-            for (int start = 0; start < pairs; start += blockSize) {
+            for (size_t bi = 0; bi < blockLevels.size(); ++bi) {
+                const int start = static_cast<int>(bi) * blockSize;
                 const int n = std::min(blockSize, pairs - start);
-                const double rms = rmsBlock(chunk.data() + start, n);
-                if (rms < noiseFloor * 1.6)
+                const double level = blockLevels[bi];
+                activeHistory.push_back(level);
+                while (activeHistory.size() > quietWindow) activeHistory.pop_front();
+                // Use the median of the last ~100 ms rather than one block:
+                // broadband impulse noise would otherwise reset the quiet
+                // counter forever, stretching every noise trigger to the 2 s
+                // capture limit and swallowing (or truncating) real packets.
+                double activeMedian = level;
+                if (activeHistory.size() >= quietWindow) {
+                    noiseSort.assign(activeHistory.begin(), activeHistory.end());
+                    const size_t mid = noiseSort.size() / 2;
+                    std::nth_element(noiseSort.begin(), noiseSort.begin() + mid,
+                                     noiseSort.end());
+                    activeMedian = noiseSort[mid];
+                }
+                if (activeMedian < noiseFloor * 1.4)
                     quietSamples += static_cast<size_t>(n);
                 else
                     quietSamples = 0;
             }
 
             if (quietSamples > quietLimit || capture.size() > maxCapture) {
+                if (!opt.dumpDir.empty()) {
+                    char name[64];
+                    std::snprintf(name, sizeof(name), "capture_%04d.wav", captureIndex++);
+                    std::string werr;
+                    if (!mc::writeWavIq(opt.dumpDir + "\\" + name, capture, params.fs, werr) &&
+                        opt.verbose)
+                        std::cerr << "[rx] " << werr << "\n";
+                }
                 mc::LoraPacket pkt;
                 std::string log;
-                if (mc::decodeLora(capture, params, pkt, log, opt.verbose)) {
+                const auto decStart = std::chrono::steady_clock::now();
+                const bool decoded = mc::decodeLora(capture, params, pkt, log, opt.verbose, 8);
+                const auto decMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - decStart).count();
+                if (opt.verbose)
+                    std::cerr << "[rx] capture " << std::fixed << std::setprecision(2)
+                              << (static_cast<double>(capture.size()) / opt.rate)
+                              << " s took " << decMs << " ms\n";
+                if (decoded) {
                     printRealtimePacket(pkt, opt);
                 } else if (opt.verbose) {
                     std::cerr << "[rx] burst captured but no packet (" << log << ")\n";
@@ -650,6 +745,14 @@ int runStream(const Options& opt, const mc::LoraParams& params, const SampleSour
             }
         }
         globalSamples += pairs;
+        if (opt.verbose) {
+            while (globalSamples >= nextReport) {
+                std::cerr << "[rx] t=" << (nextReport / opt.rate) << " s, floor="
+                          << std::fixed << std::setprecision(5) << noiseFloor
+                          << (active ? " (capturing)" : "") << "\n";
+                nextReport += opt.rate;
+            }
+        }
     }
 
     std::cout << "\nStopped.\n";
@@ -704,10 +807,10 @@ int runRealtime(Options& opt)
               << "Listening for MeshCore packets... (Ctrl+C to stop)\n"
               << std::endl;
 
-    std::vector<uint8_t> raw(65536 * 2);
+    std::vector<uint8_t> raw(131072 * 2);
     auto source = [&](std::vector<std::complex<double>>& chunk, int maxSamples,
                       std::string& readErr) -> int {
-        const int wantPairs = std::min(65536, maxSamples);
+        const int wantPairs = std::min(131072, maxSamples);
         int nRead = 0;
         if (sdr.read(raw.data(), wantPairs * 2, nRead, readErr) != 0) return -1;
         const int pairs = nRead / 2;
@@ -810,6 +913,7 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif
+    std::cout << std::unitbuf; // flush each packet so live logs are not delayed
 
     if (!mc::cryptoSelfTest()) {
         std::cerr << "internal crypto self-test failed\n";

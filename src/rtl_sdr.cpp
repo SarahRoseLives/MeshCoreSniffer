@@ -23,6 +23,7 @@ using open_fn = int (*)(rtlsdr_dev**, uint32_t);
 using close_fn = int (*)(rtlsdr_dev*);
 using set_sample_rate_fn = int (*)(rtlsdr_dev*, uint32_t);
 using get_sample_rate_fn = uint32_t (*)(rtlsdr_dev*);
+using set_tuner_bandwidth_fn = int (*)(rtlsdr_dev*, uint32_t);
 using set_center_freq_fn = int (*)(rtlsdr_dev*, uint32_t);
 using get_center_freq_fn = uint32_t (*)(rtlsdr_dev*);
 using set_freq_correction_fn = int (*)(rtlsdr_dev*, int);
@@ -50,6 +51,7 @@ struct RtlSdr::Impl {
     close_fn close_dev = nullptr;
     set_sample_rate_fn set_sample_rate = nullptr;
     get_sample_rate_fn get_sample_rate = nullptr;
+    set_tuner_bandwidth_fn set_tuner_bandwidth = nullptr;
     set_center_freq_fn set_center_freq = nullptr;
     get_center_freq_fn get_center_freq = nullptr;
     set_freq_correction_fn set_freq_correction = nullptr;
@@ -122,6 +124,7 @@ struct RtlSdr::Impl {
         MC_LOAD_REQ(read_sync, "rtlsdr_read_sync");
 
         MC_LOAD_OPT(get_sample_rate, "rtlsdr_get_sample_rate");
+        MC_LOAD_OPT(set_tuner_bandwidth, "rtlsdr_set_tuner_bandwidth");
         MC_LOAD_OPT(get_center_freq, "rtlsdr_get_center_freq");
         MC_LOAD_OPT(set_freq_correction, "rtlsdr_set_freq_correction");
         MC_LOAD_OPT(set_agc_mode, "rtlsdr_set_agc_mode");
@@ -187,24 +190,13 @@ bool RtlSdr::configure(double freqHz, uint32_t sampleRate, const std::string& ga
     }
     impl_->actualRate = impl_->get_sample_rate ? impl_->get_sample_rate(impl_->dev) : sampleRate;
 
+    // Match rtl_sdr's configuration order: size the tuner IF filter to the
+    // sample rate before tuning and configuring gain.
+    if (impl_->set_tuner_bandwidth) impl_->set_tuner_bandwidth(impl_->dev, 0);
+
     if (impl_->set_direct_sampling) impl_->set_direct_sampling(impl_->dev, 0);
     if (impl_->set_offset_tuning) impl_->set_offset_tuning(impl_->dev, 0);
     if (impl_->set_agc_mode) impl_->set_agc_mode(impl_->dev, 0);
-
-    const bool autoGain = gain.empty() || gain == "auto" || gain == "AUTO";
-    if (autoGain) {
-        impl_->set_tuner_gain_mode(impl_->dev, 1);
-    } else {
-        double db = 0.0;
-        try {
-            db = std::stod(gain);
-        } catch (...) {
-            err = "invalid gain value '" + gain + "' (use auto or dB)";
-            return false;
-        }
-        impl_->set_tuner_gain_mode(impl_->dev, 0);
-        impl_->set_tuner_gain(impl_->dev, static_cast<int>(std::llround(db * 10.0)));
-    }
 
     if (ppm != 0 && impl_->set_freq_correction)
         impl_->set_freq_correction(impl_->dev, ppm);
@@ -217,7 +209,8 @@ bool RtlSdr::configure(double freqHz, uint32_t sampleRate, const std::string& ga
         impl_->set_bias_tee(impl_->dev, 1);
     }
 
-    // Tune last: changing tuner gain / AGC after this can trigger a re-lock.
+    // Tune before configuring gain, matching rtl_sdr.  Some tuners only settle
+    // their gain mode reliably once the LO is locked.
     const uint32_t center = static_cast<uint32_t>(std::llround(freqHz));
     rc = impl_->set_center_freq(impl_->dev, center);
     if (rc != 0) {
@@ -226,6 +219,22 @@ bool RtlSdr::configure(double freqHz, uint32_t sampleRate, const std::string& ga
         return false;
     }
     impl_->actualFreq = impl_->get_center_freq ? impl_->get_center_freq(impl_->dev) : center;
+
+    const bool autoGain = gain.empty() || gain == "auto" || gain == "AUTO";
+    if (autoGain) {
+        // librtlsdr API: mode 0 = automatic gain, mode 1 = manual gain.
+        impl_->set_tuner_gain_mode(impl_->dev, 0);
+    } else {
+        double db = 0.0;
+        try {
+            db = std::stod(gain);
+        } catch (...) {
+            err = "invalid gain value '" + gain + "' (use auto or dB)";
+            return false;
+        }
+        impl_->set_tuner_gain_mode(impl_->dev, 1);
+        impl_->set_tuner_gain(impl_->dev, static_cast<int>(std::llround(db * 10.0)));
+    }
 
     impl_->reset_buffer(impl_->dev);
     return true;

@@ -37,11 +37,14 @@ struct LoraPacket {
 
 bool initLora(LoraParams& p, std::string& err);
 
-// Decode the first valid LoRa packet in the recording.
+// Decode the first valid LoRa packet in the recording.  maxBursts > 0 limits
+// the search to that many candidate bursts, which bounds worst-case latency for
+// live captures.
 bool decodeLora(const std::vector<std::complex<double>>& iq,
                 const LoraParams& p,
                 LoraPacket& out,
                 std::string& log,
-                bool verbose = false);
+                bool verbose = false,
+                int maxBursts = 0);
 
 } // namespace mc

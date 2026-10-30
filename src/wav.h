@@ -2,6 +2,7 @@
 #pragma once
 
 #include <complex>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -25,6 +26,59 @@ inline uint32_t rd32(const uint8_t* p) {
 }
 
 } // namespace detail
+
+namespace detail {
+inline void wr16(std::ofstream& f, uint16_t v)
+{
+    const char b[2] = {static_cast<char>(v & 0xff), static_cast<char>((v >> 8) & 0xff)};
+    f.write(b, 2);
+}
+inline void wr32(std::ofstream& f, uint32_t v)
+{
+    const char b[4] = {static_cast<char>(v & 0xff), static_cast<char>((v >> 8) & 0xff),
+                       static_cast<char>((v >> 16) & 0xff), static_cast<char>((v >> 24) & 0xff)};
+    f.write(b, 4);
+}
+inline int16_t toPcm16(double v)
+{
+    long x = std::llround(v * 32768.0);
+    if (x > 32767) x = 32767;
+    if (x < -32768) x = -32768;
+    return static_cast<int16_t>(x);
+}
+} // namespace detail
+
+// Write a 16-bit stereo IQ WAV (I=left, Q=right) for diagnostics.
+inline bool writeWavIq(const std::string& path,
+                       const std::vector<std::complex<double>>& iq,
+                       double sampleRate, std::string& err)
+{
+    std::ofstream f(path, std::ios::binary);
+    if (!f) { err = "cannot open " + path; return false; }
+
+    const uint32_t dataBytes = static_cast<uint32_t>(iq.size() * 4);
+    const uint32_t byteRate = static_cast<uint32_t>(sampleRate) * 4;
+    f.write("RIFF", 4);
+    detail::wr32(f, 36 + dataBytes);
+    f.write("WAVE", 4);
+    f.write("fmt ", 4);
+    detail::wr32(f, 16);
+    detail::wr16(f, 1);
+    detail::wr16(f, 2);
+    detail::wr32(f, static_cast<uint32_t>(sampleRate));
+    detail::wr32(f, byteRate);
+    detail::wr16(f, 4);
+    detail::wr16(f, 16);
+    f.write("data", 4);
+    detail::wr32(f, dataBytes);
+
+    for (const auto& s : iq) {
+        detail::wr16(f, static_cast<uint16_t>(detail::toPcm16(s.real())));
+        detail::wr16(f, static_cast<uint16_t>(detail::toPcm16(s.imag())));
+    }
+    if (!f) { err = "write failed: " + path; return false; }
+    return true;
+}
 
 inline bool readWav(const std::string& path, WavData& out, std::string& err)
 {

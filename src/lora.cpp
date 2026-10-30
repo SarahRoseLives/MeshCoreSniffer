@@ -744,20 +744,18 @@ bool tryBurst(const std::vector<std::complex<double>>& iq, int burstStart, int b
         auto d = decimate(iq, pstart, maxSymbols * p.N, p);
         if (static_cast<int>(d.size()) < 24 * p.N) return false;
         const double cfo = estimateCfo(d, p, c);
-        applyCfo(d, cfo, p);
         if (verbose && pk == 0)
             std::cerr << "[lora] burst " << burstStart << ".." << burstEnd
                       << " preamble=" << preamble << " score=" << pscore
                       << " cfo=" << cfo << " bins\n";
 
         const int center = expectedHeader * p.N - pk * eighthDec;
+        applyCfo(d, cfo, p);
         if (decodeStream(d, preamble, p, c, out, log, verbose, "dec",
-                         center - narrowHalf, center + narrowHalf, false))
+                         center - narrowHalf, center + narrowHalf, false)) {
+            if (verbose) std::cerr << "[lora] decoded at phase " << pk << "\n";
             return true;
-        if (pk == 0 &&
-            decodeStream(d, preamble, p, c, out, log, verbose, "decw",
-                         0, 70 * p.N, false))
-            return true;
+        }
         return false;
     };
 
@@ -766,15 +764,19 @@ bool tryBurst(const std::vector<std::complex<double>>& iq, int burstStart, int b
 
     // The decimated domain folds large CFOs.  Re-estimate at the full sample
     // rate (which is unambiguous across the whole captured band), shift the
-    // burst down by that amount, then retry.
-    const double cfoFull = estimateCfoFull(iq, preamble, p, c);
-    if (verbose)
-        std::cerr << "[lora] full-rate cfo=" << cfoFull << " bins ("
-                  << (cfoFull * p.bw / p.N) << " Hz)\n";
+    // burst down by that amount, then retry.  At high oversampling this scan is
+    // extremely expensive and rarely needed: an in-band LoRa signal cannot have
+    // a CFO beyond +/-BW/2, which the decimated path already covers.  Restrict
+    // it to the low-oversampling captures where it was needed.
     const int lo = std::max(0, preamble - p.sps);
     const int hi = std::min(static_cast<int>(iq.size()), preamble + maxSymbols * p.sps);
 
-    if (hi - lo > 24 * p.sps) {
+    if (p.os <= 4 && hi - lo > 24 * p.sps) {
+        const double cfoFull = estimateCfoFull(iq, preamble, p, c);
+        if (verbose)
+            std::cerr << "[lora] full-rate cfo=" << cfoFull << " bins ("
+                      << (cfoFull * p.bw / p.N) << " Hz)\n";
+
         std::vector<std::complex<double>> shifted(static_cast<size_t>(hi - lo));
         for (int k = 0; k < hi - lo; ++k) {
             const double phase = -2.0 * PI * cfoFull * static_cast<double>(k) / p.sps;
@@ -794,9 +796,15 @@ bool tryBurst(const std::vector<std::complex<double>>& iq, int burstStart, int b
 
     // Last resort: try the remaining fractional timing phases.  This is slower
     // but recovers captures whose preamble lands on an awkward sample phase.
-    static const int phaseKs[] = {1, -1, 2, -2, 3, 4, 5, 6, 7, 8};
-    for (int pk : phaseKs) {
-        if (tryDecimated(pk)) return true;
+    // At high oversampling the successful phase is almost always the best or
+    // an adjacent one, so the full sweep is wasted work there.
+    static const int phaseKsLo[] = {1, -1, 2, -2, 3, 4, 5, 6, 7, 8};
+    static const int phaseKsHi[] = {1, -1, 2, -2};
+    const bool highOs = p.os > 4;
+    const int* phaseKs = highOs ? phaseKsHi : phaseKsLo;
+    const int nPhase = highOs ? 4 : 10;
+    for (int i = 0; i < nPhase; ++i) {
+        if (tryDecimated(phaseKs[i])) return true;
     }
     return false;
 }
@@ -818,7 +826,8 @@ bool initLora(LoraParams& p, std::string& err)
 }
 
 bool decodeLora(const std::vector<std::complex<double>>& iq,
-                const LoraParams& p, LoraPacket& out, std::string& log, bool verbose)
+                const LoraParams& p, LoraPacket& out, std::string& log, bool verbose,
+                int maxBursts)
 {
     Ctx c{p, {}, {}, {}, {}};
     buildChirps(c);
@@ -826,6 +835,16 @@ bool decodeLora(const std::vector<std::complex<double>>& iq,
     auto bursts = detectBursts(iq, p);
     if (bursts.empty())
         bursts.push_back({0, static_cast<int>(iq.size())}); // scan the whole capture
+
+    if (maxBursts > 0 && bursts.size() > 1) {
+        // Impulse noise creates many tiny bursts, while a real LoRa packet is
+        // long.  Try the longest candidates first and stop after a few so one
+        // noisy capture cannot stall the live receiver.
+        std::sort(bursts.begin(), bursts.end(), [](const Burst& a, const Burst& b) {
+            return (a.end - a.start) > (b.end - b.start);
+        });
+        if (static_cast<int>(bursts.size()) > maxBursts) bursts.resize(maxBursts);
+    }
 
     for (const auto& b : bursts) {
         std::string why;

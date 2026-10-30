@@ -50,7 +50,7 @@ IQ WAV input:
 | Option | Description |
 |---|---|
 | `--freq VALUE` | Center frequency, e.g. `910.525` (MHz) or `910525000` (Hz). Default `910.525`. |
-| `--rate HZ` | RTL-SDR sample rate. Default `1000000`; must be an integer multiple of `--bw`. |
+| `--rate HZ` | RTL-SDR sample rate. Default `250000`; must be an integer multiple of `--bw` (`250000`, `500000`, `1000000`). |
 | `--gain auto\|dB` | Tuner gain. Default `auto`. |
 | `--ppm N` | RTL-SDR crystal correction. |
 | `--device N` | RTL-SDR device index. |
@@ -72,6 +72,8 @@ IQ WAV input:
 
 ## Notes
 
+- Live mode defaults to a 250 kHz sample rate: 4x oversampling of the 62.5 kHz
+  channel. Higher rates (500 kHz, 1 MHz) decode too but use more CPU.
 - The **channel name is not transmitted**. RF carries only the 1-byte channel
   hash derived from the PSK. The built-in hash `0x11` is the MeshCore public
   channel.
