@@ -1,6 +1,8 @@
 *.exe
 *.o
 *.obj
+*.dll
 build/
+build_gui/
 CMakeCache.txt
 CMakeFiles/
