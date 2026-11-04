@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <map>
@@ -28,6 +29,24 @@ namespace mcs::gui {
 namespace {
 
 using namespace theme;
+
+void openFolder(const std::string& dir)
+{
+#ifdef _WIN32
+    ShellExecuteA(nullptr, "open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    std::string quoted = "'";
+    for (char c : dir) {
+        if (c == '\'')
+            quoted += "'\\''";
+        else
+            quoted.push_back(c);
+    }
+    quoted.push_back('\'');
+    const std::string cmd = "xdg-open " + quoted + " >/dev/null 2>&1 &";
+    std::system(cmd.c_str());
+#endif
+}
 
 struct BandPreset {
     const char* name;
@@ -646,11 +665,7 @@ void drawSettings(AppState& s)
 {
     ImGui::Text("data directory: %s", s.dataDir.c_str());
     ImGui::Text("database: %s", s.dbPath.c_str());
-    if (ImGui::Button("open data folder")) {
-#ifdef _WIN32
-        ShellExecuteA(nullptr, "open", s.dataDir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-#endif
-    }
+    if (ImGui::Button("open data folder")) openFolder(s.dataDir);
     ImGui::SameLine();
     if (ImGui::Button("save settings")) s.saveSettings();
     ImGui::SameLine();
@@ -738,11 +753,7 @@ void drawMenuBar(AppState& s)
     if (ImGui::BeginMenu("Tools")) {
         if (ImGui::MenuItem("Clear history...")) s.showClearConfirm = true;
         if (ImGui::MenuItem("Clear event log")) s.logs.clear();
-        if (ImGui::MenuItem("Open data folder")) {
-#ifdef _WIN32
-            ShellExecuteA(nullptr, "open", s.dataDir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-#endif
-        }
+        if (ImGui::MenuItem("Open data folder")) openFolder(s.dataDir);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Help")) {

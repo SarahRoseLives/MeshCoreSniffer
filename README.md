@@ -55,6 +55,33 @@ pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake `
 This builds `MeshCoreSniffer-gui.exe` without touching the CLI binary. The
 script also copies the required runtime DLLs next to it.
 
+### Linux build
+
+Install the build dependencies (Debian/Ubuntu shown):
+
+```bash
+sudo apt install build-essential cmake pkg-config libglfw3-dev \
+    libsqlite3-dev libcurl4-openssl-dev libgl1-mesa-dev
+```
+
+For live RTL-SDR receive, also install the runtime library:
+
+```bash
+sudo apt install rtl-sdr
+```
+
+Build both binaries:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMESHCORE_BUILD_GUI=ON
+cmake --build build -j
+./build/MeshCoreSniffer
+./build/MeshCoreSniffer-gui
+```
+
+librtlsdr is loaded at runtime, so the CLI and offline IQ WAV decoding still
+work without an RTL-SDR installed.
+
 ## Usage
 
 Live RTL-SDR (default):
@@ -110,7 +137,9 @@ The GUI is a receive-only dashboard with the same decoder as the CLI:
 - Nodes and map: adverts with location appear on the slippy map.
 - Packet log and inspector: filters, raw hex, path/hops, MAC and decoded fields.
 - Statistics and event log; CSV/JSON export.
-- SQLite history, keys and settings under `%LOCALAPPDATA%\MeshCoreSniffer`.
+- SQLite history, keys and settings under `%LOCALAPPDATA%\MeshCoreSniffer` on
+  Windows, or `$XDG_DATA_HOME/MeshCoreSniffer`
+  (`~/.local/share/MeshCoreSniffer`) on Linux.
 - Map tiles are cached there too. Override the provider with
   `MESHCORE_TILE_URL`, `MESHCORE_TILE_UA` and `MESHCORE_TILE_KEY`.
 

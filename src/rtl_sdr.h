@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace mc {
 
@@ -16,6 +17,8 @@ public:
 
     RtlSdr(const RtlSdr&) = delete;
     RtlSdr& operator=(const RtlSdr&) = delete;
+
+    static std::vector<std::string> listDevices(std::string& err);
 
     bool open(int index, std::string& err);
     bool configure(double freqHz, uint32_t sampleRate, const std::string& gain,

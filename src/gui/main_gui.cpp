@@ -1,9 +1,11 @@
 // MeshCoreSniffer GUI: fixed Dear ImGui dashboard (GLFW + OpenGL3).
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -40,9 +42,29 @@ std::string wideToUtf8(const wchar_t* w)
 }
 #endif
 
+void applyArgs(mcs::gui::AppState& s, const std::vector<std::string>& args, bool& startNow,
+               double& exitAfter)
+{
+    for (size_t i = 0; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        if (a == "--wav" && i + 1 < args.size()) {
+            std::snprintf(s.cfgWavPath, sizeof(s.cfgWavPath), "%s", args[++i].c_str());
+            s.cfgLive = false;
+            s.saveSettings();
+        } else if (a == "--live") {
+            s.cfgLive = true;
+            s.saveSettings();
+        } else if (a == "--start") {
+            startNow = true;
+        } else if (a == "--exit-after" && i + 1 < args.size()) {
+            exitAfter = std::atof(args[++i].c_str());
+        }
+    }
+}
+
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     glfwSetErrorCallback([](int code, const char* desc) {
         std::fprintf(stderr, "glfw error %d: %s\n", code, desc);
@@ -75,31 +97,21 @@ int main()
     s.init();
 
     double exitAfter = 0.0;
-#ifdef _WIN32
     bool startNow = false;
-    int argc = 0;
-    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv) {
-        for (int i = 1; i < argc; ++i) {
-            const std::wstring a = argv[i];
-            if (a == L"--wav" && i + 1 < argc) {
-                const std::string p = wideToUtf8(argv[++i]);
-                std::snprintf(s.cfgWavPath, sizeof(s.cfgWavPath), "%s", p.c_str());
-                s.cfgLive = false;
-                s.saveSettings();
-            } else if (a == L"--live") {
-                s.cfgLive = true;
-                s.saveSettings();
-            } else if (a == L"--start") {
-                startNow = true;
-            } else if (a == L"--exit-after" && i + 1 < argc) {
-                exitAfter = std::wcstod(argv[++i], nullptr);
-            }
-        }
-        LocalFree(argv);
+    std::vector<std::string> args;
+#ifdef _WIN32
+    int wargc = 0;
+    wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (wargv) {
+        for (int i = 1; i < wargc; ++i) args.push_back(wideToUtf8(wargv[i]));
+        LocalFree(wargv);
     }
-    if (startNow) s.startReceiver();
+#else
+    (void)argc;
+    for (int i = 1; i < argc; ++i) args.push_back(argv[i]);
 #endif
+    applyArgs(s, args, startNow, exitAfter);
+    if (startNow) s.startReceiver();
 
     const ImGuiWindowFlags kRootFlags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |

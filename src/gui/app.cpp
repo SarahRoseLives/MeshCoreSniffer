@@ -2,6 +2,7 @@
 
 #include "crypto.h"
 #include "meshcore.h"
+#include "rtl_sdr.h"
 
 #include <algorithm>
 #include <cctype>
@@ -345,40 +346,12 @@ void AppState::shutdown()
 void AppState::refreshDevices()
 {
     devices.clear();
-#ifdef _WIN32
-    const char* candidates[] = {
-        "librtlsdr.dll",
-        "C:\\msys64\\mingw64\\bin\\librtlsdr.dll",
-        "rtlsdr.dll",
-    };
-    HMODULE h = nullptr;
-    for (const char* path : candidates) {
-        if (std::strchr(path, '\\') || std::strchr(path, '/'))
-            h = LoadLibraryExA(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        else
-            h = LoadLibraryA(path);
-        if (h) break;
-    }
-    if (h) {
-        using count_fn = uint32_t (*)();
-        using name_fn = const char* (*)(uint32_t);
-        auto count = reinterpret_cast<count_fn>(
-            reinterpret_cast<void*>(GetProcAddress(h, "rtlsdr_get_device_count")));
-        auto name = reinterpret_cast<name_fn>(
-            reinterpret_cast<void*>(GetProcAddress(h, "rtlsdr_get_device_name")));
-        if (count) {
-            const uint32_t n = count();
-            for (uint32_t i = 0; i < n; ++i) {
-                const char* nm = name ? name(i) : nullptr;
-                devices.push_back(nm ? nm : ("RTL-SDR " + std::to_string(i)));
-            }
-        }
-        FreeLibrary(h);
-    }
-#endif
+    std::string err;
+    devices = mc::RtlSdr::listDevices(err);
     if (cfgDevice < 0 || cfgDevice >= static_cast<int>(devices.size())) cfgDevice = 0;
-    if (devices.empty()) addLog("No RTL-SDR devices detected");
-    else {
+    if (devices.empty()) {
+        addLog(err.empty() ? "No RTL-SDR devices detected" : err);
+    } else {
         std::ostringstream os;
         os << "Found " << devices.size() << " RTL-SDR device(s)";
         addLog(os.str());
@@ -886,8 +859,69 @@ std::string saveFileDialog(const char* title, const char* filter, const char* de
     return toUtf8(file);
 }
 #else
-std::string openFileDialog(const char*, const char*, const char*) { return {}; }
-std::string saveFileDialog(const char*, const char*, const char*) { return {}; }
+namespace {
+
+std::string shellQuote(const std::string& s)
+{
+    std::string o = "'";
+    for (char c : s) {
+        if (c == '\'')
+            o += "'\\''";
+        else
+            o.push_back(c);
+    }
+    o.push_back('\'');
+    return o;
+}
+
+std::string firstFilterPattern(const char* filter)
+{
+    if (!filter || !*filter) return "*";
+    const char* p = filter;
+    while (*p) ++p;
+    ++p;
+    return (*p && std::strcmp(p, "*.*") != 0) ? p : "*";
+}
+
+std::string runFileChooser(const std::string& cmd)
+{
+    FILE* f = ::popen(cmd.c_str(), "r");
+    if (!f) return {};
+    char buf[2048];
+    std::string out;
+    if (std::fgets(buf, sizeof(buf), f)) out = buf;
+    const int rc = ::pclose(f);
+    if (rc != 0) return {};
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return out;
+}
+
+std::string chooserCommand(const char* title, const char* filter, bool save)
+{
+    std::string cmd = "zenity --file-selection";
+    if (save) cmd += " --save --confirm-overwrite";
+    if (title && *title) cmd += " --title=" + shellQuote(title);
+    const std::string pat = firstFilterPattern(filter);
+    if (pat != "*") cmd += " --file-filter=" + shellQuote(pat);
+    cmd += " 2>/dev/null";
+    return cmd;
+}
+
+} // namespace
+
+std::string openFileDialog(const char* title, const char* filter, const char*)
+{
+    return runFileChooser(chooserCommand(title, filter, false));
+}
+
+std::string saveFileDialog(const char* title, const char* filter, const char* defExt)
+{
+    std::string p = runFileChooser(chooserCommand(title, filter, true));
+    if (!p.empty() && defExt && *defExt &&
+        std::filesystem::path(p).extension().empty())
+        p += std::string(".") + defExt;
+    return p;
+}
 #endif
 
 } // namespace mcs::gui

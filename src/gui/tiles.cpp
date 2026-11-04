@@ -22,10 +22,15 @@
 #endif
 #include <windows.h>
 #include <winhttp.h>
+#endif
+
 #include <GL/gl.h>
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
+
+#if !defined(_WIN32) && defined(MESHCORE_HAVE_CURL)
+#include <curl/curl.h>
 #endif
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -116,6 +121,35 @@ int http_get(const std::string& url, const std::string& ua, std::vector<uint8_t>
     }
     WinHttpCloseHandle(hs);
     return status_code;
+}
+#elif defined(MESHCORE_HAVE_CURL)
+size_t curl_write(char* data, size_t size, size_t nmemb, void* userp)
+{
+    const size_t n = size * nmemb;
+    static_cast<std::vector<uint8_t>*>(userp)->insert(
+        static_cast<std::vector<uint8_t>*>(userp)->end(),
+        reinterpret_cast<uint8_t*>(data), reinterpret_cast<uint8_t*>(data) + n);
+    return n;
+}
+
+int http_get(const std::string& url, const std::string& ua, std::vector<uint8_t>& out)
+{
+    CURL* curl = curl_easy_init();
+    if (!curl) return 0;
+    std::vector<uint8_t> body;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, ua.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    const CURLcode rc = curl_easy_perform(curl);
+    long status = 0;
+    if (rc == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(curl);
+    if (status == 200) out.insert(out.end(), body.begin(), body.end());
+    return static_cast<int>(status);
 }
 #else
 int http_get(const std::string&, const std::string&, std::vector<uint8_t>&) { return 0; }
@@ -339,7 +373,6 @@ void TileCache::pump()
     for (auto& kv : tiles_) {
         Tile& t = kv.second;
         if (t.gl != 0 || t.rgba.empty()) continue;
-#ifdef _WIN32
         GLuint tex = 0;
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -353,7 +386,6 @@ void TileCache::pump()
         t.gl = (unsigned)tex;
         pending_count_.fetch_sub(1);
         ready_count_.fetch_add(1);
-#endif
         t.rgba.clear();
         t.rgba.shrink_to_fit();
     }

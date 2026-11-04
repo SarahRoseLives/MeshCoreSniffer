@@ -665,9 +665,21 @@ bool Receiver::decodeCapture(const std::vector<std::complex<double>>& capture,
 
 std::string defaultDataDir()
 {
+#ifdef _WIN32
     const char* la = std::getenv("LOCALAPPDATA");
     std::filesystem::path p =
         la ? std::filesystem::path(la) / "MeshCoreSniffer" : std::filesystem::path(".");
+#else
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    const char* home = std::getenv("HOME");
+    std::filesystem::path p;
+    if (xdg && *xdg)
+        p = std::filesystem::path(xdg) / "MeshCoreSniffer";
+    else if (home && *home)
+        p = std::filesystem::path(home) / ".local" / "share" / "MeshCoreSniffer";
+    else
+        p = std::filesystem::current_path() / "MeshCoreSniffer";
+#endif
     std::error_code ec;
     std::filesystem::create_directories(p, ec);
     return p.string();

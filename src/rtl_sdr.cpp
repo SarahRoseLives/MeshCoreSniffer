@@ -150,6 +150,21 @@ struct RtlSdr::Impl {
 
 RtlSdr::~RtlSdr() { close(); }
 
+std::vector<std::string> RtlSdr::listDevices(std::string& err)
+{
+    std::vector<std::string> out;
+    Impl tmp;
+    if (!tmp.load(err)) return out;
+
+    const uint32_t count = tmp.get_count ? tmp.get_count() : 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const char* n = tmp.get_name ? tmp.get_name(i) : nullptr;
+        out.push_back(n ? n : ("RTL-SDR " + std::to_string(i)));
+    }
+    tmp.unload();
+    return out;
+}
+
 bool RtlSdr::open(int index, std::string& err)
 {
     close();
