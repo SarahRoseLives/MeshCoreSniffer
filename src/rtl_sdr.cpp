@@ -95,7 +95,16 @@ struct RtlSdr::Impl {
             return false;
         }
 #else
+#if defined(__APPLE__)
+        const char* candidates[] = {
+            "/opt/local/lib/librtlsdr.dylib",
+            "/opt/local/lib/librtlsdr.0.dylib",
+            "librtlsdr.dylib",
+            "librtlsdr.0.dylib"
+        };
+#else
         const char* candidates[] = {"librtlsdr.so.0", "librtlsdr.so"};
+#endif
         for (const char* path : candidates) {
             lib = dlopen(path, RTLD_NOW);
             if (lib) break;
