@@ -16,8 +16,9 @@ CR 4/5, sync word 0x12**.
 - Group messages show the channel hash, hop count/path and decrypted text.
 - Offline IQ WAV decoding (`--iq`) prints every packet in the recording.
 - Sensitive demodulator: soft-decision FEC, automatic CFO and timing recovery.
-- **Optional desktop GUI** (`MeshCoreSniffer-gui.exe`): live map, chat channels,
-  node list, packet inspector, key manager and SQLite history.
+- **Optional desktop GUI** (`MeshCoreSniffer-gui` / `MeshCoreSniffer-gui.exe`):
+  live map, chat channels, node list, packet inspector, key manager and SQLite
+  history.
 
 ## Screenshots
 
@@ -82,9 +83,31 @@ cmake --build build -j
 librtlsdr is loaded at runtime, so the CLI and offline IQ WAV decoding still
 work without an RTL-SDR installed.
 
+### macOS build
+
+Install the build and runtime dependencies using MacPorts (`/opt/local`):
+
+```bash
+sudo port install cmake pkgconfig glfw sqlite3 curl rtl-sdr
+```
+
+Build both binaries:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMESHCORE_BUILD_GUI=ON
+cmake --build build -j$(sysctl -n hw.ncpu)
+./build/MeshCoreSniffer
+./build/MeshCoreSniffer-gui
+```
+
+`librtlsdr.dylib` is loaded at runtime, so offline IQ WAV decoding still works
+without an RTL-SDR connected.
+
 ## Usage
 
 Live RTL-SDR (default):
+
+Windows:
 
 ```powershell
 .\MeshCoreSniffer.exe
@@ -92,11 +115,28 @@ Live RTL-SDR (default):
 .\MeshCoreSniffer.exe --gain 30 --ppm 5
 ```
 
+macOS / Linux:
+
+```bash
+./build/MeshCoreSniffer
+./build/MeshCoreSniffer --freq 869.525
+./build/MeshCoreSniffer --gain 30 --ppm 5
+```
+
 IQ WAV input:
+
+Windows:
 
 ```powershell
 .\MeshCoreSniffer.exe --iq capture.wav      # decode every packet
 .\MeshCoreSniffer.exe capture.wav           # decode the first packet
+```
+
+macOS / Linux:
+
+```bash
+./build/MeshCoreSniffer --iq capture.wav    # decode every packet
+./build/MeshCoreSniffer capture.wav         # decode the first packet
 ```
 
 | Option | Description |
@@ -124,8 +164,16 @@ IQ WAV input:
 
 ## GUI
 
+Windows:
+
 ```powershell
 .\MeshCoreSniffer-gui.exe
+```
+
+macOS / Linux:
+
+```bash
+./build/MeshCoreSniffer-gui
 ```
 
 The GUI is a receive-only dashboard with the same decoder as the CLI:
@@ -138,19 +186,28 @@ The GUI is a receive-only dashboard with the same decoder as the CLI:
 - Packet log and inspector: filters, raw hex, path/hops, MAC and decoded fields.
 - Statistics and event log; CSV/JSON export.
 - SQLite history, keys and settings under `%LOCALAPPDATA%\MeshCoreSniffer` on
-  Windows, or `$XDG_DATA_HOME/MeshCoreSniffer`
-  (`~/.local/share/MeshCoreSniffer`) on Linux.
+  Windows, or `$XDG_DATA_HOME/MeshCoreSniffer` (`~/.local/share/MeshCoreSniffer`) 
+  on Linux/macOS.
 - Map tiles are cached there too. Override the provider with
   `MESHCORE_TILE_URL`, `MESHCORE_TILE_UA` and `MESHCORE_TILE_KEY`.
 
 Command-line helpers for the GUI:
+
+Windows:
 
 ```powershell
 .\MeshCoreSniffer-gui.exe --wav capture.wav --start --exit-after 15
 .\MeshCoreSniffer-gui.exe --live --start
 ```
 
-The GUI does not send messages. The console `MeshCoreSniffer.exe` is unchanged.
+macOS / Linux:
+
+```bash
+./build/MeshCoreSniffer-gui --wav capture.wav --start --exit-after 15
+./build/MeshCoreSniffer-gui --live --start
+```
+
+The GUI does not send messages. The console `MeshCoreSniffer` binary is unchanged.
 
 ## Notes
 
