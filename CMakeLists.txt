@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 project(MeshCoreSniffer C CXX)
 
+if(APPLE AND EXISTS "/opt/local")
+  list(APPEND CMAKE_PREFIX_PATH "/opt/local")
+  if(DEFINED ENV{PKG_CONFIG_PATH} AND NOT "\$ENV{PKG_CONFIG_PATH}" STREQUAL "")
+    set(ENV{PKG_CONFIG_PATH} "\$ENV{PKG_CONFIG_PATH}:/opt/local/lib/pkgconfig")
+  else()
+    set(ENV{PKG_CONFIG_PATH} "/opt/local/lib/pkgconfig")
+  endif()
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -82,6 +91,10 @@ if(MESHCORE_BUILD_GUI)
       Threads::Threads
       ${MESHCORE_OPENGL_LIBS}
   )
+
+  if(APPLE)
+    target_compile_definitions(MeshCoreSnifferGUI PRIVATE GL_SILENCE_DEPRECATION)
+  endif()
 
   if(WIN32)
     target_link_libraries(MeshCoreSnifferGUI PRIVATE
